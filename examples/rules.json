@@ -1,0 +1,9 @@
+{
+  "authFailures": 5,
+  "sourceErrors": 5,
+  "slowQueries": 3,
+  "windowSeconds": 60,
+  "cooldownSeconds": 300,
+  "slowQueryMs": 2000,
+  "maxTimestampSkewSeconds": 300
+}
