@@ -10,6 +10,7 @@ import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
+from http.client import HTTPConnection
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +19,7 @@ from urllib.request import Request, urlopen
 
 from greylog.events import ParseError, normalize, parse_line, parse_timestamp
 from greylog.cli import _export, _ingest_url, _source_timezone, _watch_spec
+from greylog.gateway import GatewayMonitor
 from greylog.server import GreyLogServer
 from greylog.store import RuleConfig, Store, iter_database_records
 from greylog.watch import FileWatcher
@@ -241,6 +243,49 @@ class ApiTests(unittest.TestCase):
         self.thread.join(timeout=2)
         self.store.close()
 
+    def _raw_post(self, path, headers, body=None):
+        connection = HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=2)
+        try:
+            connection.putrequest("POST", path)
+            for name, value in headers:
+                connection.putheader(name, value)
+            connection.endheaders(body)
+            response = connection.getresponse()
+            return response.status, json.load(response)
+        finally:
+            connection.close()
+
+    def test_json_post_framing_and_size_limits(self):
+        session = Request(self.base + "/api/session", data=b'{"token":"dashboard-token"}', method="POST",
+                          headers={"Content-Type": "application/json"})
+        with urlopen(session, timeout=2) as response:
+            cookie = response.headers["Set-Cookie"].split(";", 1)[0]
+        self.server.gateway_monitor = GatewayMonitor(self.store, self.stop)
+
+        endpoints = (
+            ("/api/ingest", [("Authorization", "Bearer ingest-token")], 65_536),
+            ("/api/gateways", [("Cookie", cookie)], 1_024),
+            ("/api/session", [], 4_096),
+        )
+        for path, authentication, maximum in endpoints:
+            cases = (
+                ([("Content-Length", "1")], 415, "JSON request required"),
+                ([("Content-Type", "application/json")], 411, "one Content-Length required"),
+                ([("Content-Type", "application/json"), ("Content-Length", "1"),
+                  ("Content-Length", "1")], 411, "one Content-Length required"),
+                ([("Content-Type", "application/json"), ("Content-Length", "invalid")],
+                 411, "valid Content-Length required"),
+                ([("Content-Type", "application/json"), ("Content-Length", "0")],
+                 413, f"request must be 1 to {maximum} bytes"),
+                ([("Content-Type", "application/json"), ("Content-Length", str(maximum + 1))],
+                 413, f"request must be 1 to {maximum} bytes"),
+            )
+            for headers, expected_status, expected_error in cases:
+                with self.subTest(path=path, headers=headers):
+                    status, payload = self._raw_post(path, authentication + headers)
+                    self.assertEqual(status, expected_status)
+                    self.assertEqual(payload, {"error": expected_error})
+
     def test_auth_ingest_bootstrap_and_sse_contract(self):
         body = json.dumps({"source": "vendor", "format": "json", "line": '{"message":"password=abc query completed","durationMs":10}'}).encode()
         with self.assertRaises(HTTPError) as caught:
@@ -317,6 +362,12 @@ class ApiTests(unittest.TestCase):
             urlopen(request, timeout=2)
         self.assertEqual(caught.exception.code, 403)
         caught.exception.close()
+
+    def test_dashboard_serves_packaged_javascript(self):
+        asset = Path(__file__).resolve().parents[1] / "greylog" / "web" / "app.js"
+        with urlopen(self.base + "/app.js", timeout=2) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), asset.read_bytes())
 
     def test_plain_vendor_event_fields_do_not_collide_with_envelope(self):
         payload = {"source": "vendor", "event": "login", "line": 42,
