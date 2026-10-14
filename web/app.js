@@ -28,6 +28,8 @@
   let lastAuthProbeAt = 0;
   let startupInFlight = false;
   let unlockInFlight = false;
+  let gatewaySaving = false;
+  let gatewayOptionsKey = "";
 
   function stringValue(value, fallback = "—") {
     if (value === null || value === undefined || value === "") return fallback;
@@ -93,6 +95,7 @@
       sources: Array.isArray(data.sources) ? data.sources : [],
       alerts: Array.isArray(data.alerts) ? data.alerts : [],
       events: Array.isArray(data.events) ? data.events : [],
+      gateway: data.gateway && typeof data.gateway === "object" ? data.gateway : null,
     };
   }
 
@@ -195,6 +198,92 @@
     $("metric-sources-caption").textContent = total !== null
       ? `${numberFormat.format(total)} total · 60s`
       : "Last 60s";
+  }
+
+  function renderGateway() {
+    const gateway = snapshot.gateway;
+    const panel = $("gateway-panel");
+    panel.hidden = !gateway;
+    if (!gateway) return;
+    const state = $("gateway-state");
+    const current = gateway.current && typeof gateway.current === "object" ? gateway.current : null;
+    const status = stringValue(gateway.status, "checking");
+    state.classList.toggle("warning", status !== "detected");
+    state.textContent = status === "detected" ? "Route detected"
+      : status === "not-in-routes" ? "Route not found"
+      : status === "unavailable" ? "Lookup unavailable" : "Checking";
+    const selected = gateway.selection && typeof gateway.selection === "object" ? gateway.selection : { gateway: "auto", interface: null };
+    if (status === "unavailable") {
+      $("gateway-detail").textContent = `Local route lookup failed${gateway.error ? `: ${stringValue(gateway.error)}` : "."}`;
+    } else if (current) {
+      $("gateway-detail").textContent = `${stringValue(current.gateway)} via ${stringValue(current.interface, "unknown interface")} · ${stringValue(current.family)} · metric ${metricValue(current.metric)} · checked ${relativeTime(gateway.checkedAt)}`;
+    } else if (selected.gateway && selected.gateway !== "auto") {
+      $("gateway-detail").textContent = `${stringValue(selected.gateway)} is not in this computer's current default routes. Entered addresses are kept as selections, but route health is not confirmed.`;
+    } else {
+      $("gateway-detail").textContent = "No default gateway route detected on this computer.";
+    }
+    if ((current && current.family === "IPv6") || (selected.gateway && String(selected.gateway).includes(":"))) {
+      $("gateway-detail").textContent += " Gateway syslog reception supports IPv4 senders only.";
+    }
+    const reachability = gateway.reachability && typeof gateway.reachability === "object" ? gateway.reachability : {};
+    $("gateway-reachability").textContent = !reachability.enabled
+      ? "ICMP echo check is off. Opt in at startup with --gateway-ping-interval 30."
+      : reachability.status === "reply"
+        ? `ICMP echo reply from ${stringValue(reachability.gateway)} · checked ${relativeTime(reachability.checkedAt)}. This does not test internet connectivity.`
+        : reachability.status === "no-reply"
+          ? `No ICMP echo reply from ${stringValue(reachability.gateway)} · checked ${relativeTime(reachability.checkedAt)}. Routers may block ICMP; this does not prove an outage.`
+          : `ICMP echo status unknown${reachability.error ? `: ${stringValue(reachability.error)}` : "."}`;
+    const syslog = gateway.syslog && typeof gateway.syslog === "object" ? gateway.syslog : {};
+    $("gateway-syslog").textContent = syslog.enabled
+      ? `Router log listener: UDP ${stringValue(syslog.bind)}:${stringValue(syslog.port)}. Configure the router to forward syslog to this computer's LAN IP and that port. Only the selected IPv4 gateway sender is accepted.`
+      : "Router log listener is off. Enable it at startup with --syslog-port 5514 (or the installer SyslogPort option), then configure router syslog forwarding to this computer's LAN IP.";
+    const routes = Array.isArray(gateway.routes) ? gateway.routes : [];
+    const choices = routes.filter((route) => route && typeof route === "object" && typeof route.gateway === "string")
+      .map((route) => ({
+        value: JSON.stringify({ gateway: route.gateway, interface: route.interface || null }),
+        label: `${route.gateway} · ${stringValue(route.interface, "unknown interface")} · metric ${metricValue(route.metric)}`,
+      }));
+    const selectedValue = selected.gateway === "auto" ? "auto" : JSON.stringify({ gateway: selected.gateway, interface: selected.interface || null });
+    if (selectedValue !== "auto" && !choices.some((choice) => choice.value === selectedValue)) {
+      choices.push({ value: selectedValue, label: `Manual: ${stringValue(selected.gateway)}` });
+    }
+    const key = JSON.stringify(choices);
+    const select = $("gateway-select");
+    if (key !== gatewayOptionsKey) {
+      select.replaceChildren(new Option("Automatic (lowest route metric)", "auto"),
+        ...choices.map((choice) => new Option(choice.label, choice.value)));
+      gatewayOptionsKey = key;
+    }
+    if (!gatewaySaving) select.value = selectedValue;
+  }
+
+  async function saveGateway(selection) {
+    if (gatewaySaving) return;
+    gatewaySaving = true;
+    const feedback = $("gateway-feedback");
+    const select = $("gateway-select");
+    select.disabled = true;
+    feedback.classList.remove("is-error");
+    feedback.textContent = "Saving selection";
+    try {
+      const response = await fetch("/api/gateways", {
+        method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(selection),
+      });
+      if (response.status === 401) { showUnlock("Session expired"); return; }
+      const data = await response.json();
+      if (!response.ok) throw new Error(stringValue(data.error, "Gateway selection failed"));
+      if (snapshot) snapshot.gateway = data;
+      feedback.textContent = "Gateway selection saved";
+      $("gateway-custom").value = "";
+    } catch (error) {
+      feedback.textContent = error.message || "Gateway selection failed";
+      feedback.classList.add("is-error");
+    } finally {
+      gatewaySaving = false;
+      select.disabled = false;
+      if (snapshot) renderGateway();
+    }
   }
 
   function makeSvg(tag, attributes = {}) {
@@ -478,6 +567,7 @@
     if (!snapshot) return;
     lastVisibleAt = Date.now();
     renderMetrics();
+    renderGateway();
     renderTraffic();
     renderSources();
     renderAlerts();
@@ -654,8 +744,10 @@
     const input = $("unlock-token");
     const submit = $("unlock-submit");
     const error = $("unlock-error");
-    if (!input.value) {
-      error.textContent = "Token required";
+    const suppliedToken = input.value;
+    const trimmedToken = suppliedToken.trim();
+    if (!trimmedToken) {
+      error.textContent = "Dashboard token required";
       error.classList.add("is-error");
       input.focus();
       return;
@@ -665,16 +757,20 @@
     error.textContent = "Checking";
     error.classList.remove("is-error");
     try {
-      const pending = fetch("/api/session", {
+      const requestSession = (token) => fetch("/api/session", {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: input.value }),
+        body: JSON.stringify({ token }),
       });
+      const pending = requestSession(suppliedToken);
       input.value = "";
-      const response = await pending;
+      let response = await pending;
+      if (response.status === 401 && suppliedToken !== trimmedToken) {
+        response = await requestSession(trimmedToken);
+      }
       if (!response.ok) {
-        error.textContent = response.status === 401 ? "Invalid token" : "Unlock failed";
+        error.textContent = response.status === 401 ? "Invalid dashboard token. Check this server's generated or configured dashboard token." : "Unlock failed";
         error.classList.add("is-error");
         return;
       }
@@ -697,6 +793,15 @@
   });
   $("event-search").addEventListener("input", renderEvents);
   $("source-filter").addEventListener("change", renderEvents);
+  $("gateway-select").addEventListener("change", () => {
+    const value = $("gateway-select").value;
+    if (!value) return;
+    saveGateway(value === "auto" ? { gateway: "auto" } : JSON.parse(value));
+  });
+  $("gateway-custom-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveGateway({ gateway: $("gateway-custom").value.trim() });
+  });
   $("severity-filter").addEventListener("change", renderEvents);
   window.addEventListener("pagehide", () => { if (eventSource) eventSource.close(); });
   window.addEventListener("pageshow", (event) => { if (event.persisted && !locked) startDashboard(); });

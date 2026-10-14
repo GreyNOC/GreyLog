@@ -36,12 +36,43 @@ jobs:
       - name: Check Debian package
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
         run: |
-          dpkg-deb --field dist/greylog_0.1.2-1_all.deb Package Version Architecture
-          dpkg-deb --contents dist/greylog_0.1.2-1_all.deb | grep -F 'usr/bin/greylog'
+          dpkg-deb --field dist/greylog_0.1.3-1_all.deb Package Version Architecture
+          dpkg-deb --contents dist/greylog_0.1.3-1_all.deb | grep -F 'usr/bin/greylog'
           stage=$(mktemp -d)
           trap 'rm -rf "$stage"' EXIT
-          dpkg-deb --extract dist/greylog_0.1.2-1_all.deb "$stage"
+          dpkg-deb --extract dist/greylog_0.1.3-1_all.deb "$stage"
           PYTHONPATH="$stage/usr/lib/python3/dist-packages" python -m greylog --help
           mkdir -p "$stage/shadow/greylog"
           printf 'raise SystemExit("shadow package loaded")\n' > "$stage/shadow/greylog/__main__.py"
           (cd "$stage/shadow" && PYTHONPATH="$stage/usr/lib/python3/dist-packages" "$stage/usr/bin/greylog" --help)
+  windows-portable:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install PyInstaller
+        run: python -m pip install pyinstaller==6.19.0
+      - name: Build portable EXE and installable ZIP
+        shell: pwsh
+        run: ./packaging/windows/build.ps1
+      - name: Smoke test portable EXE
+        run: python packaging/windows/smoke_portable.py dist/windows/GreyLog-windows-x64.exe
+      - name: Smoke test per-user installation
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP 'GreyLog-bundle'
+          $installed = Join-Path $env:RUNNER_TEMP 'GreyLog-installed'
+          $data = Join-Path $env:RUNNER_TEMP 'GreyLog-data'
+          Expand-Archive -LiteralPath dist/windows/GreyLog-windows-x64-installable.zip -DestinationPath $bundle
+          & (Join-Path $bundle 'Install-GreyLog.ps1') -InstallRoot $installed -DataRoot $data -NoRegistration
+          & (Join-Path $installed 'GreyLog.exe') --help
+          & (Join-Path $installed 'Uninstall-GreyLog.ps1') -InstallRoot $installed -NoRegistration
+          if (Test-Path -LiteralPath (Join-Path $installed 'GreyLog.exe')) { throw 'Uninstall left the EXE behind' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GreyLog-Windows-portable-and-installer
+          path: |
+            dist/windows/GreyLog-windows-x64.exe
+            dist/windows/GreyLog-windows-x64-installable.zip
