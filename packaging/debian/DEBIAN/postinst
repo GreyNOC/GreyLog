@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+if [ "$1" = configure ]; then
+    echo "GreyLog installed. Run: greylog serve --db \$HOME/.local/share/greylog/greylog.db"
+fi

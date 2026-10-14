@@ -71,13 +71,16 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(event["timestamp"], "2026-10-14T12:00:00.000Z")
 
     def test_redaction_happens_before_event_is_returned(self):
-        event = normalize({"message": "password=hunter2 Bearer abc.def Basic dXNlcjpwYXNz", "api_key": "secret",
+        event = normalize({"message": "password=hunter2 Bearer abc.def Basic dXNlcjpwYXNz https://x/?session_id=opaque",
+                           "api_key": "secret", "jwt": "header.payload.signature",
                            "nested": {"connectionString": "postgres://u:p@db"}}, source="test")
         serialized = json.dumps(event)
         self.assertNotIn("hunter2", serialized)
         self.assertNotIn("abc.def", serialized)
         self.assertNotIn("dXNlcjpwYXNz", serialized)
         self.assertNotIn("postgres://u:p@db", serialized)
+        self.assertNotIn("opaque", serialized)
+        self.assertNotIn("header.payload.signature", serialized)
         self.assertEqual(event["attributes"]["api_key"], "[REDACTED]")
 
     def test_invalid_json_and_timestamp_do_not_echo_data(self):
@@ -182,8 +185,12 @@ class AlertTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "logs.sqlite"
             store = Store(path)
+            store.add_event(normalize({"message": "event"}, source="db"))
+            for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+                with self.subTest(path=candidate):
+                    self.assertTrue(candidate.is_file())
+                    self.assertEqual(stat.S_IMODE(candidate.stat().st_mode), 0o600)
             store.close()
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_alert_evidence_keeps_samples_after_event_retention(self):
         store = Store(":memory:", retention=2, rules=RuleConfig(authFailures=2))
@@ -214,7 +221,8 @@ class ApiTests(unittest.TestCase):
     def setUp(self):
         self.store = Store(":memory:")
         self.stop = threading.Event()
-        self.server = GreyLogServer(("127.0.0.1", 0), self.store, "test-token", self.stop)
+        self.server = GreyLogServer(("127.0.0.1", 0), self.store, "ingest-token", self.stop,
+                                     dashboard_token="dashboard-token")
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -233,13 +241,13 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 401)
         caught.exception.close()
         request = Request(self.base + "/api/ingest", data=body, method="POST",
-                          headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"})
+                          headers={"Authorization": "Bearer ingest-token", "Content-Type": "application/json"})
         with urlopen(request, timeout=2) as response:
             self.assertEqual(response.status, 201)
             obj = json.load(response)
         self.assertEqual(obj["event"]["sourceId"], "vendor")
         self.assertNotIn("password=abc", json.dumps(obj))
-        session = Request(self.base + "/api/session", data=b'{"token":"test-token"}', method="POST",
+        session = Request(self.base + "/api/session", data=b'{"token":"dashboard-token"}', method="POST",
                           headers={"Content-Type": "application/json"})
         with urlopen(session, timeout=2) as response:
             self.assertEqual(response.status, 204)
@@ -272,13 +280,31 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 401)
         self.assertIsNone(caught.exception.headers.get("Set-Cookie"))
         caught.exception.close()
+
+    def test_ingest_and_dashboard_tokens_are_separate(self):
+        session = Request(self.base + "/api/session", data=b'{"token":"ingest-token"}', method="POST",
+                          headers={"Content-Type": "application/json"})
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(session, timeout=2)
+        self.assertEqual(caught.exception.code, 401)
+        caught.exception.close()
+
+    def test_connection_limit_requires_positive_value(self):
+        with self.assertRaises(ValueError):
+            GreyLogServer(("127.0.0.1", 0), self.store, "ingest-token", max_connections=0)
+        request = Request(self.base + "/api/ingest", data=b'{"message":"ok"}', method="POST",
+                          headers={"Authorization": "Bearer dashboard-token", "Content-Type": "application/json"})
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(request, timeout=2)
+        self.assertEqual(caught.exception.code, 401)
+        caught.exception.close()
         # The dashboard shell remains public so the analyst can enter the token.
         with urlopen(self.base + "/", timeout=2) as response:
             self.assertEqual(response.status, 200)
             self.assertIn("default-src 'self'", response.headers["Content-Security-Policy"])
 
     def test_cross_origin_session_request_is_rejected(self):
-        request = Request(self.base + "/api/session", data=b'{"token":"test-token"}', method="POST",
+        request = Request(self.base + "/api/session", data=b'{"token":"dashboard-token"}', method="POST",
                           headers={"Content-Type": "application/json", "Origin": "http://evil.example"})
         with self.assertRaises(HTTPError) as caught:
             urlopen(request, timeout=2)
@@ -289,14 +315,14 @@ class ApiTests(unittest.TestCase):
         payload = {"source": "vendor", "event": "login", "line": 42,
                    "message": "Login failed for user alice", "kind": "auth", "outcome": "failed"}
         request = Request(self.base + "/api/ingest", data=json.dumps(payload).encode(), method="POST",
-                          headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"})
+                          headers={"Authorization": "Bearer ingest-token", "Content-Type": "application/json"})
         with urlopen(request, timeout=2) as response:
             event = json.load(response)["event"]
         self.assertEqual(event["sourceId"], "vendor")
         self.assertEqual(event["outcome"], "failure")
         self.assertEqual(event["attributes"]["line"], 42)
         malformed = Request(self.base + "/api/ingest", data=b'{"source":"vendor","format":"json","line":42}',
-                            method="POST", headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"})
+                            method="POST", headers={"Authorization": "Bearer ingest-token", "Content-Type": "application/json"})
         with self.assertRaises(HTTPError) as caught:
             urlopen(malformed, timeout=2)
         self.assertEqual(caught.exception.code, 400)
@@ -306,7 +332,7 @@ class ApiTests(unittest.TestCase):
     def test_deep_json_request_is_rejected_without_handler_crash(self):
         body = b'[' * 1100 + b'0' + b']' * 1100
         request = Request(self.base + "/api/ingest", data=body, method="POST",
-                          headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"})
+                          headers={"Authorization": "Bearer ingest-token", "Content-Type": "application/json"})
         with self.assertRaises(HTTPError) as caught:
             urlopen(request, timeout=2)
         self.assertEqual(caught.exception.code, 400)
@@ -320,7 +346,7 @@ class ApiTests(unittest.TestCase):
         for _ in range(5):
             self.store.add_event(normalize({"kind": "auth", "outcome": "failure", "actor": "alice",
                                             "message": "login failed"}, source="bulk", received_at=stamp))
-        session = Request(self.base + "/api/session", data=b'{"token":"test-token"}', method="POST",
+        session = Request(self.base + "/api/session", data=b'{"token":"dashboard-token"}', method="POST",
                           headers={"Content-Type": "application/json"})
         with urlopen(session, timeout=2) as response:
             cookie = response.headers["Set-Cookie"].split(";", 1)[0]

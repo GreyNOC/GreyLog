@@ -17,12 +17,13 @@ MAX_LINE = 32_768
 MAX_MESSAGE = 4_096
 MAX_ATTRIBUTES = 16_384
 
-_SECRET_KEY = re.compile(r"(?:pass(?:word|wd|phrase)?|secret|token|api[_-]?key|auth(?:orization)?|cookie|credential|private[_-]?key|dsn|connection[_-]?string)", re.I)
-_INLINE_SECRET = re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization|cookie)\s*[:=]\s*([^\s,;]+)")
+_SECRET_KEY = re.compile(r"(?:pass(?:word|wd|phrase)?|secret|token|api[_-]?key|access[_-]?key(?:[_-]?id)?|auth(?:orization)?|cookie|credential|private[_-]?key|session(?:[_-]?(?:id|key))?|jwt|signature|sig|shared[_-]?key|dsn|connection[_-]?string)", re.I)
+_INLINE_SECRET = re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key|access[_-]?key(?:[_-]?id)?|authorization|cookie|session(?:[_-]?(?:id|key))?|jwt|signature|sig|shared[_-]?key)\s*[:=]\s*([^\s,;]+)")
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 _BASIC = re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=]+")
 _COOKIE = re.compile(r"(?i)\b(?:set-)?cookie\s*:\s*[^\r\n]+")
 _URI_CREDS = re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@", re.I)
+_QUERY_SECRET = re.compile(r"([?&](?:password|passwd|secret|token|api[_-]?key|access[_-]?key|session(?:[_-]?(?:id|key))?|jwt|signature|sig)=)[^&#\s]+", re.I)
 _DURATION = re.compile(r"(?i)\b(?:duration|elapsed|query[_ ]time)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(ms|msec|milliseconds?|s|sec|seconds?)\b")
 _PG = re.compile(r"^(?P<date>\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:[.,]\d+)?(?:\s*(?:UTC|[+-]\d\d(?::?\d\d)?|Z))?)\s+(?:\[[^]]+\]\s*)?(?P<level>DEBUG|LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC):\s*(?P<message>.*)$", re.I)
 _MYSQL = re.compile(r"^(?P<date>\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d)?)\s+.*?\[(?P<level>ERROR|WARNING|WARN|NOTE|INFO|DEBUG)\]\s*(?P<message>.*)$", re.I)
@@ -117,6 +118,7 @@ def redact_text(value: str) -> str:
     value = _BEARER.sub("Bearer [REDACTED]", value)
     value = _BASIC.sub("Basic [REDACTED]", value)
     value = _URI_CREDS.sub(r"\1[REDACTED]@", value)
+    value = _QUERY_SECRET.sub(r"\1[REDACTED]", value)
     return _INLINE_SECRET.sub(lambda match: f"{match.group(1)}=[REDACTED]", value)
 
 

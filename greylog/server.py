@@ -20,6 +20,7 @@ from .store import Store
 
 MAX_BODY = 65_536
 MAX_SESSION_BODY = 4_096
+DEFAULT_MAX_CONNECTIONS = 32
 SESSION_COOKIE = "greylog_session"
 _PACKAGE_WEB = Path(__file__).resolve().parent / "web"
 _CHECKOUT_WEB = Path(__file__).resolve().parent.parent / "web"
@@ -30,17 +31,38 @@ class GreyLogServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], store: Store, token: str, stop: threading.Event | None = None):
+    def __init__(self, address: tuple[str, int], store: Store, token: str, stop: threading.Event | None = None,
+                 *, dashboard_token: str | None = None, max_connections: int = DEFAULT_MAX_CONNECTIONS):
         host = address[0]
         if host not in {"127.0.0.1", "localhost"}:
             raise ValueError("GreyLog serves on loopback only (127.0.0.1 or localhost)")
         if not token:
             raise ValueError("HTTP ingest requires a nonempty bearer token")
+        if not dashboard_token:
+            dashboard_token = token
+        if max_connections < 1:
+            raise ValueError("max connections must be at least 1")
         self.store = store
         self.token = token
+        self.dashboard_token = dashboard_token
         self.session_id = secrets.token_urlsafe(32)
         self.stop = stop or threading.Event()
+        self.connection_slots = threading.BoundedSemaphore(max_connections)
         super().__init__(address, GreyLogHandler)
+
+    def verify_request(self, request, client_address) -> bool:
+        """Cap concurrent request handlers before ThreadingMixIn starts a thread."""
+        return self.connection_slots.acquire(blocking=False)
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            self.finish_request(request, client_address)
+            self.shutdown_request(request)
+        except Exception:
+            self.handle_error(request, client_address)
+            self.shutdown_request(request)
+        finally:
+            self.connection_slots.release()
 
 
 class GreyLogHandler(BaseHTTPRequestHandler):
@@ -324,7 +346,7 @@ class GreyLogHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict) or not isinstance(payload.get("token"), str):
             self._json(400, {"error": "token string required"})
             return
-        if not hmac.compare_digest(payload["token"], self.server.token):
+        if not hmac.compare_digest(payload["token"], self.server.dashboard_token):
             self._json(401, {"error": "invalid token"})
             return
         self.send_response(204)

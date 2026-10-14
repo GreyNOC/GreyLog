@@ -29,3 +29,4 @@ Thumbs.db
 /exports/
 build/
 dist/
+*.deb
