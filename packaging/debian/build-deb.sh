@@ -15,6 +15,7 @@ trap cleanup EXIT
 mkdir -p "$root/dist"
 cp -a "$root/packaging/debian/DEBIAN" "$package_root/"
 cp -a "$root/packaging/debian/usr" "$package_root/"
+sed -i 's/\r$//' "$package_root/usr/bin/greylog"
 sed -i "s/^Version:.*/Version: ${version}-${revision}/" "$package_root/DEBIAN/control"
 mkdir -p "$package_root/usr/lib/python3/dist-packages"
 cp -a "$root/greylog" "$package_root/usr/lib/python3/dist-packages/"

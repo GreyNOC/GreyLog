@@ -17,7 +17,8 @@ MAX_LINE = 32_768
 MAX_MESSAGE = 4_096
 MAX_ATTRIBUTES = 16_384
 
-_SECRET_KEY = re.compile(r"(?:pass(?:word|wd|phrase)?|secret|token|api[_-]?key|access[_-]?key(?:[_-]?id)?|auth(?:orization)?|cookie|credential|private[_-]?key|session(?:[_-]?(?:id|key))?|jwt|signature|sig|shared[_-]?key|dsn|connection[_-]?string)", re.I)
+_SECRET_KEY = re.compile(r"(?:pass(?:word|wd|phrase)?|secret|token|api[_-]?key|access[_-]?key(?:[_-]?id)?|auth(?:orization)?|cookie|credential|private[_-]?key|session(?:[_-]?(?:id|key))?|jwt|signature|shared[_-]?key|dsn|connection[_-]?string)", re.I)
+_SHORT_SECRET_KEY = re.compile(r"sig", re.I)
 _INLINE_SECRET = re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key|access[_-]?key(?:[_-]?id)?|authorization|cookie|session(?:[_-]?(?:id|key))?|jwt|signature|sig|shared[_-]?key)\s*[:=]\s*([^\s,;]+)")
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 _BASIC = re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=]+")
@@ -129,7 +130,8 @@ def redact(value: Any, depth: int = 0) -> Any:
         result = {}
         for key, item in list(value.items())[:100]:
             safe_key = str(key)[:128]
-            result[safe_key] = "[REDACTED]" if _SECRET_KEY.search(safe_key) else redact(item, depth + 1)
+            is_secret = _SECRET_KEY.search(safe_key) or _SHORT_SECRET_KEY.fullmatch(safe_key)
+            result[safe_key] = "[REDACTED]" if is_secret else redact(item, depth + 1)
         return result
     if isinstance(value, list):
         return [redact(item, depth + 1) for item in value[:100]]
