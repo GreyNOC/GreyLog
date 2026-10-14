@@ -271,7 +271,7 @@ class GatewayMonitor(threading.Thread):
         self._ping_error: str | None = None
         self._ping_at: str | None = None
         self._ping_gateway: str | None = None
-        self._last_ping_mono = 0.0
+        self._last_ping_mono: float | None = None
         self._on_change: Callable[[str | None], None] | None = None
         self.store.register_source("local-gateway", "os-route")
         self.select(gateway, interface, persist=False)
@@ -306,7 +306,7 @@ class GatewayMonitor(threading.Thread):
                 self._ping_error = None
                 self._ping_at = None
                 self._ping_gateway = sender
-                self._last_ping_mono = 0.0
+                self._last_ping_mono = None
             changed_sender = sender != before
         if changed_sender:
             self._notify_sender()
@@ -375,7 +375,7 @@ class GatewayMonitor(threading.Thread):
                 self._ping_error = None
                 self._ping_at = None
                 self._ping_gateway = sender
-                self._last_ping_mono = 0.0
+                self._last_ping_mono = None
             changed_sender = before_sender != sender
         if changed_sender:
             self._notify_sender()
@@ -416,7 +416,7 @@ class GatewayMonitor(threading.Thread):
                 self._ping_status = "unknown"
                 self._ping_gateway = None
                 return
-            if now - self._last_ping_mono < self.ping_interval:
+            if self._last_ping_mono is not None and now - self._last_ping_mono < self.ping_interval:
                 return
             self._last_ping_mono = now
             self._ping_gateway = gateway

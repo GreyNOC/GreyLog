@@ -11,6 +11,7 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from greylog.events import normalize
 from greylog.store import RuleConfig, Store
@@ -101,13 +102,17 @@ class GatewaySyslogTests(unittest.TestCase):
     def test_malformed_json_datagram_does_not_stop_gateway_collection(self):
         self.receiver.set_gateway_ip("127.0.0.1")
         malformed = '{"a":' + '[' * 2000 + '0' + ']' * 2000 + '}'
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
-            client.sendto(malformed.encode("ascii"), self.receiver.address)
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            if self.store.bootstrap()["sources"][0]["errors"]:
-                break
-            time.sleep(0.02)
+        # Decoder recursion limits differ across Python versions. Force the
+        # parser failure so this checks the receiver's per-packet recovery.
+        with patch("greylog.syslog.parse_line", side_effect=RecursionError("nested JSON")) as parse:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+                client.sendto(malformed.encode("ascii"), self.receiver.address)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if self.store.bootstrap()["sources"][0]["errors"]:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(parse.call_count, 1)
         self.assertGreater(self.store.bootstrap()["sources"][0]["errors"], 0)
         self.assertTrue(self.receiver.is_alive())
         self.send("IDS alert: port scan detected")

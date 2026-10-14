@@ -152,7 +152,7 @@ class GatewayDiscoveryTests(unittest.TestCase):
             on = GatewayMonitor(store, threading.Event(), ping_interval=30)
             with patch("greylog.gateway.discover_gateways", return_value=[route]), patch(
                 "greylog.gateway._ping_once", return_value=("reply", None)
-            ) as ping:
+            ) as ping, patch("greylog.gateway.time.monotonic", return_value=1.0):
                 off.refresh()
                 self.assertEqual(ping.call_count, 0)
                 on.refresh()
