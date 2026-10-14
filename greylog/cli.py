@@ -18,8 +18,10 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .events import FORMATS, ParseError, parse_line, timezone_for_naive, validate_source_name
+from .gateway import GatewayMonitor, discover_gateways, load_saved_selection
 from .server import GreyLogServer
 from .store import RuleConfig, Store, iter_database_records
+from .syslog import SyslogReceiver
 from .watch import FileWatcher
 
 
@@ -69,6 +71,8 @@ class _NoRedirect(HTTPRedirectHandler):
 def _serve(args: argparse.Namespace) -> int:
     store = None
     server = None
+    gateway_monitor = None
+    syslog_receiver = None
     stop = threading.Event()
     watchers = []
     try:
@@ -85,18 +89,58 @@ def _serve(args: argparse.Namespace) -> int:
         unknown_zones = set(source_zones) - {name for name, _, _ in args.watch}
         if unknown_zones:
             raise ValueError(f"source timezone refers to unwatched source(s): {', '.join(sorted(unknown_zones))}")
+        selection_path = None if args.db == ":memory:" else Path(f"{Path(args.db).expanduser().resolve()}.gateway.json")
+        if args.gateway_interface and args.gateway is None:
+            raise ValueError("--gateway-interface requires --gateway")
+        gateway_choice, gateway_interface = args.gateway, args.gateway_interface
+        if gateway_choice is None and selection_path is not None:
+            try:
+                saved = load_saved_selection(selection_path)
+                if saved is not None:
+                    gateway_choice, gateway_interface = saved
+            except (OSError, ValueError) as exc:
+                print(f"greylog: saved gateway selection ignored: {exc}", file=sys.stderr)
+        gateway_monitor = GatewayMonitor(store, stop, gateway="auto" if gateway_choice is None else gateway_choice,
+                                         interface=gateway_interface, selection_path=selection_path,
+                                         ping_interval=args.gateway_ping_interval)
+        gateway_monitor.refresh()
+        if args.syslog_port is None and args.syslog_bind != "0.0.0.0":
+            raise ValueError("--syslog-bind requires --syslog-port")
+        if args.syslog_port is not None:
+            syslog_receiver = SyslogReceiver(store, None, args.syslog_bind, port=args.syslog_port,
+                                             source=args.syslog_source, stop=stop,
+                                             naive_timezone=args.timezone)
+            gateway_monitor.set_on_change(
+                lambda ip: syslog_receiver.set_gateway_ip(ip if ip and ":" not in ip else None))
         server = GreyLogServer((args.host, args.port), store, token, stop,
-                               dashboard_token=dashboard_token, max_connections=args.max_connections)
+                               dashboard_token=dashboard_token, max_connections=args.max_connections,
+                               gateway_monitor=gateway_monitor, syslog_receiver=syslog_receiver)
         watchers = [FileWatcher(store, name, format, path, from_start=args.from_start, stop=stop,
                                 naive_timezone=source_zones.get(name, args.timezone))
                     for name, format, path in args.watch]
         for watcher in watchers:
             watcher.start()
+        gateway_monitor.start()
+        if syslog_receiver is not None:
+            syslog_receiver.start()
         print(f"GreyLog dashboard: http://{args.host}:{server.server_address[1]}/", flush=True)
-        if generated_ingest:
-            print(f"Generated local ingest token: {token}", flush=True)
+        print("Dashboard login requires the dashboard token; the ingest token is for the CLI/API only.", flush=True)
         if generated_dashboard:
             print(f"Generated local dashboard token: {dashboard_token}", flush=True)
+        else:
+            print("Dashboard token: use the value set with --dashboard-token or GREYLOG_DASHBOARD_TOKEN.", flush=True)
+        gateway = gateway_monitor.snapshot()
+        selected = gateway["current"]
+        if selected:
+            print(f"Selected local gateway route: {selected['gateway']} via {selected['interface']} ({selected['family']})", flush=True)
+        else:
+            print(f"Selected local gateway route: {gateway['status']}; use 'greylog gateways' to list candidates", flush=True)
+        if generated_ingest:
+            print(f"Generated local ingest token: {token}", flush=True)
+        if syslog_receiver is not None:
+            print(f"Gateway syslog receiver: UDP {syslog_receiver.address[0]}:{syslog_receiver.address[1]}; "
+                  "accepting only the selected IPv4 gateway sender. Configure the router to forward syslog "
+                  "to this computer's LAN IP and port.", flush=True)
         print(f"Watching {len(args.watch)} file source(s).", flush=True)
         server.serve_forever(poll_interval=0.25)
         return 0
@@ -108,13 +152,39 @@ def _serve(args: argparse.Namespace) -> int:
         return 2
     finally:
         stop.set()
+        if syslog_receiver is not None:
+            syslog_receiver.close()
         if server is not None:
             server.server_close()
         for watcher in watchers:
             if watcher.is_alive():
                 watcher.join(timeout=2)
+        if gateway_monitor is not None and gateway_monitor.is_alive():
+            gateway_monitor.join(timeout=2)
+        if syslog_receiver is not None and syslog_receiver.is_alive():
+            syslog_receiver.join(timeout=2)
         if store is not None:
             store.close()
+
+
+def _gateways(args: argparse.Namespace) -> int:
+    try:
+        routes = discover_gateways()
+    except OSError as exc:
+        print(f"greylog: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        from dataclasses import asdict
+        print(json.dumps([asdict(route) for route in routes], indent=2))
+    elif routes:
+        for index, route in enumerate(routes, 1):
+            print(f"{index}. {route.gateway} via {route.interface or 'unknown interface'} "
+                  f"({route.family}, metric {route.metric})")
+        print("Start with --gateway ADDRESS [--gateway-interface NAME] to select a route; "
+              "you may enter an IP address that is not listed.")
+    else:
+        print("No default gateway routes found. You may enter one with serve --gateway ADDRESS.")
+    return 0
 
 
 def _ingest(args: argparse.Namespace) -> int:
@@ -256,9 +326,24 @@ def build_parser() -> argparse.ArgumentParser:
                        help="override timezone for a watched source; repeat as needed")
     serve.add_argument("--token", help="HTTP ingest bearer token (or GREYLOG_TOKEN)")
     serve.add_argument("--dashboard-token", help="dashboard token (or GREYLOG_DASHBOARD_TOKEN)")
+    serve.add_argument("--gateway", metavar="AUTO|IP",
+                       help="select a local default gateway route; an unlisted IP can be entered manually")
+    serve.add_argument("--gateway-interface", metavar="NAME",
+                       help="interface name when the selected gateway IP appears on multiple routes")
+    serve.add_argument("--gateway-ping-interval", type=int, metavar="SECONDS",
+                       help="opt in to one ICMP echo every 30-3600 seconds; no reply does not prove outage")
+    serve.add_argument("--syslog-port", type=int, metavar="PORT",
+                       help="enable UDP gateway syslog reception on this port (for example 5514)")
+    serve.add_argument("--syslog-bind", default="0.0.0.0", metavar="LOCAL_IP",
+                       help="local IPv4 address for the syslog listener (default: all local interfaces)")
+    serve.add_argument("--syslog-source", default="gateway", metavar="NAME",
+                       help="source name for accepted gateway syslog records")
     serve.add_argument("--max-connections", type=int, default=32, help="maximum concurrent local HTTP connections")
     serve.add_argument("--rules", help="JSON rule threshold configuration")
     serve.set_defaults(func=_serve)
+    gateways = sub.add_parser("gateways", help="list local default gateway routes without contacting them")
+    gateways.add_argument("--json", action="store_true", help="print machine-readable route data")
+    gateways.set_defaults(func=_gateways)
     ingest = sub.add_parser("ingest", help="POST file or stdin lines to a running server")
     ingest.add_argument("file", nargs="?", default="-", help="log file path or - for stdin")
     ingest.add_argument("--url", default="http://127.0.0.1:8765", help="server base URL")

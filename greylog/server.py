@@ -16,7 +16,9 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from .events import FORMATS, MAX_LINE, ParseError, normalize, parse_line, timezone_for_naive, validate_source_name
+from .gateway import GatewayMonitor
 from .store import Store
+from .syslog import SyslogReceiver
 
 MAX_BODY = 65_536
 MAX_SESSION_BODY = 4_096
@@ -32,7 +34,9 @@ class GreyLogServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, address: tuple[str, int], store: Store, token: str, stop: threading.Event | None = None,
-                 *, dashboard_token: str | None = None, max_connections: int = DEFAULT_MAX_CONNECTIONS):
+                 *, dashboard_token: str | None = None, max_connections: int = DEFAULT_MAX_CONNECTIONS,
+                 gateway_monitor: GatewayMonitor | None = None,
+                 syslog_receiver: SyslogReceiver | None = None):
         host = address[0]
         if host not in {"127.0.0.1", "localhost"}:
             raise ValueError("GreyLog serves on loopback only (127.0.0.1 or localhost)")
@@ -43,6 +47,8 @@ class GreyLogServer(ThreadingHTTPServer):
         if max_connections < 1:
             raise ValueError("max connections must be at least 1")
         self.store = store
+        self.gateway_monitor = gateway_monitor
+        self.syslog_receiver = syslog_receiver
         self.token = token
         self.dashboard_token = dashboard_token
         self.session_id = secrets.token_urlsafe(32)
@@ -147,6 +153,23 @@ class GreyLogHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _gateway_data(self) -> dict[str, Any] | None:
+        monitor = self.server.gateway_monitor
+        if monitor is None:
+            return None
+        data = monitor.snapshot()
+        receiver = self.server.syslog_receiver
+        data["syslog"] = ({"enabled": True, "bind": receiver.address[0], "port": receiver.address[1]}
+                          if receiver is not None else {"enabled": False})
+        return data
+
+    def _snapshot(self) -> dict[str, Any]:
+        result = self.server.store.bootstrap()
+        gateway = self._gateway_data()
+        if gateway is not None:
+            result["gateway"] = gateway
+        return result
+
     def do_GET(self) -> None:
         if not self._require_local_host() or not self._require_same_origin():
             return
@@ -155,7 +178,15 @@ class GreyLogHandler(BaseHTTPRequestHandler):
             if not self._has_dashboard_session():
                 self._json(401, {"error": "dashboard session required"})
                 return
-            self._json(200, self.server.store.bootstrap())
+            self._json(200, self._snapshot())
+        elif path == "/api/gateways":
+            if not self._has_dashboard_session():
+                self._json(401, {"error": "dashboard session required"})
+                return
+            if self.server.gateway_monitor is None:
+                self._json(404, {"error": "gateway monitor unavailable"})
+                return
+            self._json(200, self._gateway_data())
         elif path == "/api/stream":
             if not self._has_dashboard_session():
                 self._json(401, {"error": "dashboard session required"})
@@ -182,7 +213,7 @@ class GreyLogHandler(BaseHTTPRequestHandler):
         self.end_headers()
         while not self.server.stop.is_set():
             try:
-                snapshot = json.dumps(self.server.store.bootstrap(), ensure_ascii=False, separators=(",", ":"))
+                snapshot = json.dumps(self._snapshot(), ensure_ascii=False, separators=(",", ":"))
                 self.wfile.write(f"event: snapshot\ndata: {snapshot}\n\n".encode("utf-8"))
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError, OSError):
@@ -248,6 +279,9 @@ class GreyLogHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/api/session":
             self._session()
+            return
+        if path == "/api/gateways":
+            self._select_gateway()
             return
         if path != "/api/ingest":
             self._json(404, {"error": "not found"})
@@ -317,6 +351,48 @@ class GreyLogHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": str(exc)})
         except (TypeError, ValueError) as exc:
             self._json(400, {"error": str(exc)})
+
+    def _select_gateway(self) -> None:
+        monitor = self.server.gateway_monitor
+        if monitor is None:
+            self._json(404, {"error": "gateway monitor unavailable"})
+            return
+        if not self._has_dashboard_session():
+            self._json(401, {"error": "dashboard session required"})
+            return
+        if self.headers.get_content_type() != "application/json":
+            self.close_connection = True
+            self._json(415, {"error": "JSON request required"})
+            return
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1:
+            self.close_connection = True
+            self._json(411, {"error": "one Content-Length required"})
+            return
+        try:
+            length = int(lengths[0])
+        except ValueError:
+            self.close_connection = True
+            self._json(411, {"error": "valid Content-Length required"})
+            return
+        if length <= 0 or length > 1_024:
+            self.close_connection = True
+            self._json(413, {"error": "request must be 1 to 1024 bytes"})
+            return
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+            self._json(400, {"error": "invalid JSON request"})
+            return
+        if not isinstance(payload, dict) or set(payload) - {"gateway", "interface"}:
+            self._json(400, {"error": "gateway selection requires gateway and optional interface"})
+            return
+        try:
+            monitor.select(payload.get("gateway"), payload.get("interface"))
+        except (ValueError, OSError) as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        self._json(200, self._gateway_data())
 
     def _session(self) -> None:
         if self.headers.get_content_type() != "application/json":

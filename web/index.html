@@ -44,9 +44,33 @@
           <button id="retry-button" type="button" hidden>Retry</button>
         </div>
 
+        <section class="gateway-panel" id="gateway-panel" aria-labelledby="gateway-title" hidden>
+          <div class="gateway-heading">
+            <div>
+              <p class="panel-kicker">LOCAL NETWORK ROUTES</p>
+              <h2 id="gateway-title">Selected gateway</h2>
+            </div>
+            <span class="gateway-state" id="gateway-state">Checking</span>
+          </div>
+          <p class="gateway-detail" id="gateway-detail">Checking this computer's default routes.</p>
+          <div class="gateway-controls">
+            <label for="gateway-select">Choose a detected route</label>
+            <select id="gateway-select"><option value="auto">Automatic</option></select>
+            <form id="gateway-custom-form" autocomplete="off">
+              <label for="gateway-custom">Gateway not listed?</label>
+              <input id="gateway-custom" type="text" placeholder="Enter gateway IP address" autocapitalize="off" spellcheck="false" required>
+              <button type="submit">Use address</button>
+            </form>
+          </div>
+          <p class="gateway-feedback" id="gateway-feedback" role="status" aria-live="polite"></p>
+          <p class="gateway-reachability" id="gateway-reachability">ICMP availability check is off.</p>
+          <p class="gateway-syslog" id="gateway-syslog">Checking router log listener.</p>
+          <p class="gateway-note">Route status comes from this computer. Router events require syslog forwarding from your gateway; this view does not capture network traffic or discover devices.</p>
+        </section>
+
         <section class="metrics" aria-label="Current metrics">
           <article class="metric-card metric-traffic">
-            <div class="metric-top"><span>EVENTS / MIN</span></div>
+            <div class="metric-top"><span>LOG EVENTS / MIN</span></div>
             <strong class="metric-value" id="metric-epm">—</strong>
             <span class="metric-caption">Ingest rate</span>
           </article>
@@ -71,15 +95,15 @@
           <section class="panel traffic-panel" aria-labelledby="traffic-title">
             <div class="panel-heading">
               <div>
-                <p class="panel-kicker">TRAFFIC VOLUME</p>
-                <h2 id="traffic-title">Traffic heartbeat</h2>
+                <p class="panel-kicker">LOG EVENT VOLUME</p>
+                <h2 id="traffic-title">Event heartbeat</h2>
               </div>
               <div class="panel-heading-right">
                 <span class="live-tag">60 SECOND WINDOW</span>
               </div>
             </div>
             <div class="traffic-context">
-              <span>Events / second</span>
+              <span>Received log events / second</span>
               <span id="traffic-peak">Peak —</span>
             </div>
             <div class="traffic-chart-wrap" id="traffic-chart-wrap">
@@ -101,7 +125,7 @@
                 <path id="chart-line" class="chart-line" fill="none"></path>
                 <circle id="chart-end-dot" class="chart-end-dot" r="5" hidden></circle>
               </svg>
-              <div class="chart-empty" id="chart-empty">Awaiting data</div>
+              <div class="chart-empty" id="chart-empty">Awaiting log events</div>
               <div class="chart-stale" id="chart-stale" hidden>STALE</div>
             </div>
             <div class="chart-axis"><span>60s ago</span><span>45s</span><span>30s</span><span>15s</span><span>Now</span></div>
@@ -182,9 +206,9 @@
         <span class="unlock-mark owl-tile" aria-hidden="true"><img src="/owl.png" alt=""></span>
         <p class="panel-kicker">GREYLOG ACCESS</p>
         <h2 id="unlock-title">Unlock GreyLog</h2>
-        <p class="unlock-caption" id="unlock-caption">Local dashboard</p>
+        <p class="unlock-caption" id="unlock-caption">Enter this server's dashboard token. If generated, it is printed in the terminal. The ingest token cannot unlock this page.</p>
         <form id="unlock-form" autocomplete="off">
-          <label for="unlock-token">GreyLog token</label>
+          <label for="unlock-token">Dashboard token</label>
           <input id="unlock-token" name="token" type="password" required autocomplete="off" autocapitalize="off" spellcheck="false">
           <p class="unlock-error" id="unlock-error" role="status" aria-live="polite"></p>
           <button id="unlock-submit" type="submit">Unlock</button>

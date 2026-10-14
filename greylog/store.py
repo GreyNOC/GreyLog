@@ -31,7 +31,8 @@ def _record(kind: str, row: sqlite3.Row) -> dict[str, Any]:
                 "sourceId": row["source_id"], "vendor": row["vendor"], "kind": row["kind"],
                 "severity": row["severity"], "actor": row["actor"], "target": row["target"],
                 "action": row["action"], "outcome": row["outcome"], "message": row["message"],
-                "attributes": json.loads(row["attributes"], parse_constant=lambda _: None)}
+                "attributes": json.loads(row["attributes"], parse_constant=lambda _: None),
+                "gatewaySignal": bool(row["gateway_signal"])}
     if kind == "alerts":
         return {"id": row["id"], "rule": row["rule"], "severity": row["severity"],
                 "source": row["source"], "message": row["message"], "count": row["count"],
@@ -138,7 +139,9 @@ class Store:
                     severity TEXT NOT NULL, actor TEXT NOT NULL, target TEXT NOT NULL,
                     action TEXT NOT NULL, outcome TEXT NOT NULL, message TEXT NOT NULL,
                     attributes TEXT NOT NULL, duration_ms REAL,
-                    alert_eligible INTEGER NOT NULL DEFAULT 1
+                    alert_eligible INTEGER NOT NULL DEFAULT 1,
+                    gateway_signal INTEGER NOT NULL DEFAULT 0,
+                    gateway_source INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_received ON events(received_at);
                 CREATE INDEX IF NOT EXISTS idx_events_window ON events(source_id, timestamp);
@@ -161,6 +164,10 @@ class Store:
             event_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(events)")}
             if "alert_eligible" not in event_columns:
                 self.db.execute("ALTER TABLE events ADD COLUMN alert_eligible INTEGER NOT NULL DEFAULT 1")
+            if "gateway_signal" not in event_columns:
+                self.db.execute("ALTER TABLE events ADD COLUMN gateway_signal INTEGER NOT NULL DEFAULT 0")
+            if "gateway_source" not in event_columns:
+                self.db.execute("ALTER TABLE events ADD COLUMN gateway_source INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         with self.lock:
@@ -196,8 +203,11 @@ class Store:
             else:
                 self.db.execute("UPDATE sources SET last_poll=? WHERE name=?", (utc_now(), name))
 
-    def add_event(self, event: dict[str, Any], *, format: str | None = None) -> list[dict[str, Any]]:
+    def add_event(self, event: dict[str, Any], *, format: str | None = None,
+                  gateway_signal: bool = False) -> list[dict[str, Any]]:
         source = event["sourceId"]
+        gateway_source = format == "gateway-syslog"
+        gateway_signal = bool(gateway_signal and gateway_source)
         attributes = event["attributes"]
         skew = abs((_time(event["receivedAt"]) - _time(event["timestamp"])).total_seconds())
         alert_eligible = skew <= self.rules.maxTimestampSkewSeconds
@@ -215,14 +225,17 @@ class Store:
         with self.lock, self.db:
             self.db.execute("INSERT OR IGNORE INTO sources(name,format) VALUES (?,?)", (source, format or event["vendor"]))
             self.db.execute("""INSERT INTO events
-                (id,timestamp,received_at,source_id,vendor,kind,severity,actor,target,action,outcome,message,attributes,duration_ms,alert_eligible)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                (id,timestamp,received_at,source_id,vendor,kind,severity,actor,target,action,outcome,message,attributes,duration_ms,alert_eligible,gateway_signal,gateway_source)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 event["id"], event["timestamp"], event["receivedAt"], source, event["vendor"], event["kind"],
                 event["severity"], event["actor"], event["target"], event["action"], event["outcome"],
                 event["message"], json.dumps(attributes, ensure_ascii=False), duration, int(alert_eligible),
+                int(gateway_signal), int(gateway_source),
             ))
             self.db.execute("UPDATE sources SET events=events+1, last_seen=?, has_error=0, last_error=NULL WHERE name=?", (event["receivedAt"], source))
-            alerts = self._evaluate(event) if alert_eligible else []
+            alerts = (self._evaluate(event, gateway_source=format == "gateway-syslog",
+                                     gateway_signal=gateway_signal)
+                      if alert_eligible else [])
             if self.alert_retention > 0:
                 total_alerts = self.db.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
                 if total_alerts > self.alert_retention:
@@ -235,7 +248,8 @@ class Store:
         self._restrict_sidecar_permissions()
         return alerts
 
-    def _evaluate(self, event: dict[str, Any]) -> list[dict[str, Any]]:
+    def _evaluate(self, event: dict[str, Any], *, gateway_source: bool = False,
+                  gateway_signal: bool = False) -> list[dict[str, Any]]:
         timestamp = _time(event["timestamp"])
         start = _iso(timestamp - timedelta(seconds=self.rules.windowSeconds))
         end = event["timestamp"]
@@ -244,6 +258,12 @@ class Store:
         if event["kind"] == "auth" and event["outcome"] == "failure" and event["actor"]:
             candidates.append(("auth_failures", "high", event["actor"], self.rules.authFailures,
                                "kind='auth' AND outcome='failure' AND actor=?", (event["actor"],)))
+        if gateway_source and event["kind"] == "auth" and event["outcome"] == "failure" and not event["actor"]:
+            candidates.append(("gateway_auth_failures", "medium", "", self.rules.authFailures,
+                               "gateway_source=1 AND kind='auth' AND outcome='failure' AND actor=''", ()))
+        if gateway_source and gateway_signal:
+            candidates.append(("gateway_security_signal", "medium", "", 1,
+                               "gateway_signal=1", ()))
         if event["kind"] != "auth" and event["severity"] in {"error", "critical"}:
             candidates.append(("source_errors", "medium", "", self.rules.sourceErrors,
                                "kind!='auth' AND severity IN ('error','critical')", ()))
@@ -275,6 +295,10 @@ class Store:
                 evidence["slowQueryMs"] = self.rules.slowQueryMs
             if rule == "auth_failures":
                 message = f"{count} authentication failures for {actor} on {source} in {self.rules.windowSeconds}s"
+            elif rule == "gateway_auth_failures":
+                message = f"{count} gateway authentication failures on {source} in {self.rules.windowSeconds}s"
+            elif rule == "gateway_security_signal":
+                message = f"{count} gateway log security signal(s) on {source} in {self.rules.windowSeconds}s; review evidence"
             elif rule == "source_errors":
                 message = f"{count} errors on {source} in {self.rules.windowSeconds}s"
             else:
