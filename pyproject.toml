@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "greylog"
+version = "0.1.0"
+description = "Local-first log monitoring CLI and analyst dashboard"
+readme = "README.md"
+authors = [{ name = "GreyNOC" }]
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+keywords = ["logging", "monitoring", "security", "dashboard"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Logging",
+    "Topic :: System :: Monitoring",
+]
+dependencies = []
+
+[project.scripts]
+greylog = "greylog.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["greylog*"]
+
+[tool.setuptools.package-data]
+greylog = ["web/*"]
