@@ -95,6 +95,19 @@ def main() -> int:
             reader.join(timeout=2)
             if process.stdout is not None:
                 process.stdout.close()
+            if os.name == "nt":
+                # taskkill can return before the frozen child releases SQLite
+                # sidecars; wait for that child before TemporaryDirectory exits.
+                deadline = time.monotonic() + 5
+                while True:
+                    try:
+                        for path in database.parent.glob(database.name + "*"):
+                            path.unlink(missing_ok=True)
+                        break
+                    except PermissionError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.1)
 
 
 if __name__ == "__main__":
