@@ -1,2 +1,2 @@
 #!/bin/sh
-exec /usr/bin/python3 -m greylog "$@"
+exec /usr/bin/python3 -P -m greylog "$@"

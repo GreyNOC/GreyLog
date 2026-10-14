@@ -83,6 +83,13 @@ class ParsingTests(unittest.TestCase):
         self.assertNotIn("header.payload.signature", serialized)
         self.assertEqual(event["attributes"]["api_key"], "[REDACTED]")
 
+    def test_short_sig_key_does_not_redact_unrelated_attributes(self):
+        event = normalize({"sig": "proof", "signal": "green", "design": "approved", "assigned": "ops"})
+        self.assertEqual(event["attributes"]["sig"], "[REDACTED]")
+        self.assertEqual(event["attributes"]["signal"], "green")
+        self.assertEqual(event["attributes"]["design"], "approved")
+        self.assertEqual(event["attributes"]["assigned"], "ops")
+
     def test_invalid_json_and_timestamp_do_not_echo_data(self):
         with self.assertRaises(ParseError) as caught:
             parse_line('{"password":"hunter2"', format="auto")

@@ -36,9 +36,12 @@ jobs:
       - name: Check Debian package
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
         run: |
-          dpkg-deb --field dist/greylog_0.1.1-1_all.deb Package Version Architecture
-          dpkg-deb --contents dist/greylog_0.1.1-1_all.deb | grep -F 'usr/bin/greylog'
+          dpkg-deb --field dist/greylog_0.1.2-1_all.deb Package Version Architecture
+          dpkg-deb --contents dist/greylog_0.1.2-1_all.deb | grep -F 'usr/bin/greylog'
           stage=$(mktemp -d)
           trap 'rm -rf "$stage"' EXIT
-          dpkg-deb --extract dist/greylog_0.1.1-1_all.deb "$stage"
+          dpkg-deb --extract dist/greylog_0.1.2-1_all.deb "$stage"
           PYTHONPATH="$stage/usr/lib/python3/dist-packages" python -m greylog --help
+          mkdir -p "$stage/shadow/greylog"
+          printf 'raise SystemExit("shadow package loaded")\n' > "$stage/shadow/greylog/__main__.py"
+          (cd "$stage/shadow" && PYTHONPATH="$stage/usr/lib/python3/dist-packages" "$stage/usr/bin/greylog" --help)

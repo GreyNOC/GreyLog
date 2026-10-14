@@ -23,7 +23,7 @@ python3 -m venv .venv
 Install the Debian package with `apt`; it includes the `greylog` command for the CLI and dashboard.
 
 ```bash
-sudo apt install ./greylog_0.1.1-1_all.deb
+sudo apt install ./greylog_0.1.2-1_all.deb
 greylog serve --db "$HOME/.local/share/greylog/greylog.db"
 ```
 
