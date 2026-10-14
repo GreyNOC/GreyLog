@@ -75,22 +75,28 @@ def _serve(args: argparse.Namespace) -> int:
         rules = RuleConfig.from_file(args.rules)
         store = Store(args.db, rules=rules)
         token = args.token or os.environ.get("GREYLOG_TOKEN")
-        generated = not token
+        generated_ingest = not token
         token = token or secrets.token_urlsafe(32)
+        dashboard_token = args.dashboard_token or os.environ.get("GREYLOG_DASHBOARD_TOKEN")
+        generated_dashboard = not dashboard_token
+        dashboard_token = dashboard_token or secrets.token_urlsafe(32)
         timezone_for_naive(args.timezone)
         source_zones = dict(args.source_timezone)
         unknown_zones = set(source_zones) - {name for name, _, _ in args.watch}
         if unknown_zones:
             raise ValueError(f"source timezone refers to unwatched source(s): {', '.join(sorted(unknown_zones))}")
-        server = GreyLogServer((args.host, args.port), store, token, stop)
+        server = GreyLogServer((args.host, args.port), store, token, stop,
+                               dashboard_token=dashboard_token, max_connections=args.max_connections)
         watchers = [FileWatcher(store, name, format, path, from_start=args.from_start, stop=stop,
                                 naive_timezone=source_zones.get(name, args.timezone))
                     for name, format, path in args.watch]
         for watcher in watchers:
             watcher.start()
         print(f"GreyLog dashboard: http://{args.host}:{server.server_address[1]}/", flush=True)
-        if generated:
+        if generated_ingest:
             print(f"Generated local ingest token: {token}", flush=True)
+        if generated_dashboard:
+            print(f"Generated local dashboard token: {dashboard_token}", flush=True)
         print(f"Watching {len(args.watch)} file source(s).", flush=True)
         server.serve_forever(poll_interval=0.25)
         return 0
@@ -249,6 +255,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--source-timezone", type=_source_timezone, action="append", default=[], metavar="NAME=ZONE",
                        help="override timezone for a watched source; repeat as needed")
     serve.add_argument("--token", help="HTTP ingest bearer token (or GREYLOG_TOKEN)")
+    serve.add_argument("--dashboard-token", help="dashboard token (or GREYLOG_DASHBOARD_TOKEN)")
+    serve.add_argument("--max-connections", type=int, default=32, help="maximum concurrent local HTTP connections")
     serve.add_argument("--rules", help="JSON rule threshold configuration")
     serve.set_defaults(func=_serve)
     ingest = sub.add_parser("ingest", help="POST file or stdin lines to a running server")

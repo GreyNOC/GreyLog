@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "greylog"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local-first log monitoring CLI and analyst dashboard"
 readme = "README.md"
 authors = [{ name = "GreyNOC" }]

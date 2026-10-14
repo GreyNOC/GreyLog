@@ -1,0 +1,12 @@
+Package: greylog
+Version: 0.1.1-1
+Section: admin
+Priority: optional
+Architecture: all
+Depends: python3 (>= 3.11)
+Maintainer: GreyNOC <Customerservice@greynoc.com>
+Homepage: https://github.com/GreyNOC/GreyLog
+Description: Local-first log monitoring CLI and analyst dashboard
+ GreyLog tails local log files or receives JSON events, stores normalized
+ events in SQLite, evaluates alert rules, and serves a loopback-only live
+ analyst dashboard.

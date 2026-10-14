@@ -30,3 +30,15 @@ jobs:
         run: python -m pip wheel . --no-deps --wheel-dir dist
       - name: Check wheel assets
         run: python -c "import glob, zipfile; z = zipfile.ZipFile(glob.glob('dist/greylog-*.whl')[0]); names = set(z.namelist()); required = {'greylog/web/index.html', 'greylog/web/styles.css', 'greylog/web/app.js', 'greylog/web/owl.png'}; assert required <= names, required - names; assert any(n.endswith('/licenses/LICENSE') for n in names); assert any(n.endswith('/licenses/NOTICE') for n in names)"
+      - name: Build Debian package
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        run: bash packaging/debian/build-deb.sh
+      - name: Check Debian package
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        run: |
+          dpkg-deb --field dist/greylog_0.1.1-1_all.deb Package Version Architecture
+          dpkg-deb --contents dist/greylog_0.1.1-1_all.deb | grep -F 'usr/bin/greylog'
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage"' EXIT
+          dpkg-deb --extract dist/greylog_0.1.1-1_all.deb "$stage"
+          PYTHONPATH="$stage/usr/lib/python3/dist-packages" python -m greylog --help

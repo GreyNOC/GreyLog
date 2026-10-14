@@ -18,19 +18,32 @@ python3 -m venv .venv
 .venv/bin/python -m pip install .
 ```
 
+### Debian and Ubuntu
+
+Install the Debian package with `apt`; it includes the `greylog` command for the CLI and dashboard.
+
+```bash
+sudo apt install ./greylog_0.1.1-1_all.deb
+greylog serve --db "$HOME/.local/share/greylog/greylog.db"
+```
+
+To build the package from a checkout, run `bash packaging/debian/build-deb.sh`. The result is written to `dist/`.
+
 ## Run
 
-Set the same long, random `GREYLOG_TOKEN` in the server and any process sending events through the HTTP API. Use it to unlock the dashboard. Keep it out of source control. If unset, the server prints a generated token at startup.
+Use separate long, random tokens for ingestion and the dashboard. Set `GREYLOG_TOKEN` for collectors and `GREYLOG_DASHBOARD_TOKEN` to unlock the dashboard. Keep both out of source control. If either is unset, the server prints a generated replacement at startup.
 
 ```powershell
 # Windows PowerShell
 $env:GREYLOG_TOKEN = "YOUR_RANDOM_TOKEN"
+$env:GREYLOG_DASHBOARD_TOKEN = "YOUR_DASHBOARD_TOKEN"
 .\.venv\Scripts\python.exe -m greylog serve --db .\data\greylog.db --watch 'postgres:postgresql:C:\logs\postgresql.log'
 ```
 
 ```bash
 # Linux
 export GREYLOG_TOKEN='YOUR_RANDOM_TOKEN'
+export GREYLOG_DASHBOARD_TOKEN='YOUR_DASHBOARD_TOKEN'
 .venv/bin/python -m greylog serve --db ./data/greylog.db --watch 'postgres:postgresql:/var/log/postgresql/postgresql.log'
 ```
 
@@ -70,8 +83,8 @@ python -m greylog export --db ./data/greylog.db --dir ./exports both
 
 ## Security and scope
 
-- The server binds to loopback only. The dashboard and read APIs require a token-backed browser session; there are no separate user accounts or roles. Anyone with the token and local port access can read events. The browser session expires when the server restarts. Do not publish the port or put it behind a public proxy without separate authentication and TLS.
-- HTTP ingestion requires a bearer token. The CLI sender connects to loopback only. Treat the token as a secret.
+- The server binds to loopback only. The dashboard and read APIs require a dashboard token-backed browser session; there are no separate user accounts or roles. The browser session expires when the server restarts. Do not publish the port or put it behind a public proxy without separate authentication and TLS.
+- HTTP ingestion requires its own bearer token. The CLI sender connects to loopback only. Treat both tokens as secrets and do not use the same value for both.
 - SQLite contains event details and alert evidence. Restrict file access, back it up as needed, and set a retention policy suitable for your data. GreyLog caps stored events at 50,000 and alerts at 5,000 by default. Exports contain only records still retained when the export runs.
 - Redaction of common secret fields and inline patterns is best effort. Review source logs and field mappings before forwarding sensitive data.
 - File watchers poll even when quiet. HTTP sources appear stale after 60 seconds without an event because there is no separate heartbeat endpoint.

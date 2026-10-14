@@ -6,6 +6,7 @@ import json
 import math
 import os
 import sqlite3
+import stat
 import threading
 import uuid
 from dataclasses import asdict, dataclass
@@ -91,7 +92,8 @@ class Store:
         self.path = str(path)
         if self.path != ":memory:":
             db_path = Path(self.path).expanduser().resolve()
-            db_path.parent.mkdir(parents=True, exist_ok=True)
+            parent_missing = not db_path.parent.exists()
+            db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             try:
                 descriptor = os.open(db_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
             except FileExistsError:
@@ -99,6 +101,8 @@ class Store:
             else:
                 os.close(descriptor)
             if os.name == "posix":
+                if parent_missing:
+                    os.chmod(db_path.parent, 0o700)
                 os.chmod(db_path, 0o600)
             self.path = str(db_path)
         self.rules = rules or RuleConfig()
@@ -110,6 +114,20 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
         self._create_schema()
+        self._restrict_sidecar_permissions()
+
+    def _restrict_sidecar_permissions(self) -> None:
+        """Keep SQLite's WAL and shared-memory files private on POSIX hosts."""
+        if self.path == ":memory:" or os.name != "posix":
+            return
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(f"{self.path}{suffix}")
+            try:
+                mode = candidate.lstat().st_mode
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(mode):
+                os.chmod(candidate, 0o600)
 
     def _create_schema(self) -> None:
         with self.lock, self.db:
@@ -214,7 +232,8 @@ class Store:
                 total = self.db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
                 if total > self.retention:
                     self.db.execute("DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY received_at ASC LIMIT ?)", (total - self.retention,))
-            return alerts
+        self._restrict_sidecar_permissions()
+        return alerts
 
     def _evaluate(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         timestamp = _time(event["timestamp"])
