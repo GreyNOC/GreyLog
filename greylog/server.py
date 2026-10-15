@@ -24,9 +24,7 @@ MAX_BODY = 65_536
 MAX_SESSION_BODY = 4_096
 DEFAULT_MAX_CONNECTIONS = 32
 SESSION_COOKIE = "greylog_session"
-_PACKAGE_WEB = Path(__file__).resolve().parent / "web"
-_CHECKOUT_WEB = Path(__file__).resolve().parent.parent / "web"
-WEB_ROOT = _PACKAGE_WEB if _PACKAGE_WEB.is_dir() else _CHECKOUT_WEB
+WEB_ROOT = Path(__file__).resolve().parent / "web"
 
 
 class GreyLogServer(ThreadingHTTPServer):
@@ -152,6 +150,28 @@ class GreyLogHandler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(body)
+
+    def _json_body_length(self, maximum: int) -> int | None:
+        if self.headers.get_content_type() != "application/json":
+            self.close_connection = True
+            self._json(415, {"error": "JSON request required"})
+            return None
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1:
+            self.close_connection = True
+            self._json(411, {"error": "one Content-Length required"})
+            return None
+        try:
+            length = int(lengths[0])
+        except ValueError:
+            self.close_connection = True
+            self._json(411, {"error": "valid Content-Length required"})
+            return None
+        if length <= 0 or length > maximum:
+            self.close_connection = True
+            self._json(413, {"error": f"request must be 1 to {maximum} bytes"})
+            return None
+        return length
 
     def _gateway_data(self) -> dict[str, Any] | None:
         monitor = self.server.gateway_monitor
@@ -291,24 +311,8 @@ class GreyLogHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._json(401, {"error": "missing or invalid bearer token"})
             return
-        if self.headers.get_content_type() != "application/json":
-            self.close_connection = True
-            self._json(415, {"error": "JSON request required"})
-            return
-        lengths = self.headers.get_all("Content-Length", [])
-        if len(lengths) != 1:
-            self.close_connection = True
-            self._json(411, {"error": "one Content-Length required"})
-            return
-        try:
-            length = int(lengths[0])
-        except ValueError:
-            self.close_connection = True
-            self._json(411, {"error": "valid Content-Length required"})
-            return
-        if length <= 0 or length > MAX_BODY:
-            self.close_connection = True
-            self._json(413, {"error": f"request must be 1 to {MAX_BODY} bytes"})
+        length = self._json_body_length(MAX_BODY)
+        if length is None:
             return
         payload: Any = None
         source_name = "http"
@@ -360,24 +364,8 @@ class GreyLogHandler(BaseHTTPRequestHandler):
         if not self._has_dashboard_session():
             self._json(401, {"error": "dashboard session required"})
             return
-        if self.headers.get_content_type() != "application/json":
-            self.close_connection = True
-            self._json(415, {"error": "JSON request required"})
-            return
-        lengths = self.headers.get_all("Content-Length", [])
-        if len(lengths) != 1:
-            self.close_connection = True
-            self._json(411, {"error": "one Content-Length required"})
-            return
-        try:
-            length = int(lengths[0])
-        except ValueError:
-            self.close_connection = True
-            self._json(411, {"error": "valid Content-Length required"})
-            return
-        if length <= 0 or length > 1_024:
-            self.close_connection = True
-            self._json(413, {"error": "request must be 1 to 1024 bytes"})
+        length = self._json_body_length(1_024)
+        if length is None:
             return
         try:
             payload = json.loads(self.rfile.read(length))
@@ -395,24 +383,8 @@ class GreyLogHandler(BaseHTTPRequestHandler):
         self._json(200, self._gateway_data())
 
     def _session(self) -> None:
-        if self.headers.get_content_type() != "application/json":
-            self.close_connection = True
-            self._json(415, {"error": "JSON request required"})
-            return
-        lengths = self.headers.get_all("Content-Length", [])
-        if len(lengths) != 1:
-            self.close_connection = True
-            self._json(411, {"error": "one Content-Length required"})
-            return
-        try:
-            length = int(lengths[0])
-        except ValueError:
-            self.close_connection = True
-            self._json(411, {"error": "valid Content-Length required"})
-            return
-        if length <= 0 or length > MAX_SESSION_BODY:
-            self.close_connection = True
-            self._json(413, {"error": f"request must be 1 to {MAX_SESSION_BODY} bytes"})
+        length = self._json_body_length(MAX_SESSION_BODY)
+        if length is None:
             return
         try:
             payload = json.loads(self.rfile.read(length))
